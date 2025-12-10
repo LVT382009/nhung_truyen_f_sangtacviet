@@ -34,8 +34,8 @@ def setup_driver():
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
     
-    driver.set_page_load_timeout(10) 
-    driver.set_script_timeout(10)
+    driver.set_page_load_timeout(30) 
+    driver.set_script_timeout(30)
     return driver
 
 def get_book_id(url):
@@ -47,6 +47,14 @@ def get_book_id(url):
     # ID Jjwxc: novelid=123456
     match_jjwxc = re.search(r'novelid=(\d+)', url)
     if match_jjwxc: return match_jjwxc.group(1)
+
+    # ID Qimao: /shuku/123456/
+    match_qimao = re.search(r'/shuku/(\d+)', url)
+    if match_qimao: return match_qimao.group(1)
+
+    # ID Ciweimao: /book/100xxxx
+    match_ciweimao = re.search(r'/book/(\d+)', url)
+    if match_ciweimao: return match_ciweimao.group(1)
     
     return None
 
@@ -119,7 +127,7 @@ def reset_stv_tab(driver, original_window):
     except: pass
     driver.switch_to.window(original_window)
     driver.switch_to.new_window('tab')
-    driver.set_page_load_timeout(5)
+    driver.set_page_load_timeout(15) 
     try:
         driver.get(SANGTACVIET_URL)
         return True
@@ -127,9 +135,8 @@ def reset_stv_tab(driver, original_window):
 
 def run_automation(driver, wait, custom_url, source_type="fanqie"):
     """
-    Hàm chạy auto.
-    custom_url: Bắt buộc phải có.
-    source_type: 'fanqie' hoặc 'jjwxc'
+    Hàm chạy auto đa năng.
+    source_type: 'fanqie', 'jjwxc', 'qimao', 'ciweimao'
     """
     processed_ids = load_history()
     print(f"\n[*] Lịch sử: {len(processed_ids)} ID.")
@@ -148,6 +155,29 @@ def run_automation(driver, wait, custom_url, source_type="fanqie"):
         else:
             single_page_mode = True
             print("[*] Jjwxc Mode: Chạy 1 trang duy nhất.")
+            
+    elif source_type == "qimao":
+        match = re.search(r'-(\d+)/?$', custom_url)
+        if match:
+            current_page = int(match.group(1))
+            prefix = custom_url[:match.start(1)]
+            suffix = custom_url[match.end(1):]
+            url_template = f"{prefix}{{}}{suffix}"
+            print(f"[*] Qimao Mode: Bắt đầu từ trang {current_page}...")
+        else:
+            single_page_mode = True
+            print("[*] Qimao Mode: Chạy 1 trang duy nhất.")
+
+    elif source_type == "ciweimao":
+        match = re.search(r'/(\d+)/?$', custom_url)
+        if match:
+            current_page = int(match.group(1))
+            url_template = custom_url[:match.start(1)] + "/{}" + custom_url[match.end(1):]
+            print(f"[*] Ciweimao Mode: Bắt đầu từ trang {current_page}...")
+        else:
+            single_page_mode = True
+            print("[*] Ciweimao Mode: Chạy 1 trang duy nhất.")
+            
     else:
         # Fanqie
         match = re.search(r'page_(\d+)', custom_url)
@@ -160,9 +190,8 @@ def run_automation(driver, wait, custom_url, source_type="fanqie"):
     stop_scan_completely = False 
 
     while True:
-        # Kiểm tra phím q ngay đầu vòng lặp trang
         if msvcrt.kbhit() and msvcrt.getch().lower() == b'q':
-            print("\n[!!!] Đã nhận lệnh DỪNG (Tại màn hình chuyển trang).")
+            print("\n[!!!] Đã nhận lệnh DỪNG.")
             break
 
         if stop_scan_completely: break
@@ -173,48 +202,71 @@ def run_automation(driver, wait, custom_url, source_type="fanqie"):
         print(f"\n==================================================")
         print(f"[*] QUÉT TRANG: {current_page} ({source_type.upper()})")
         
-        # 1. QUÉT LINK (TÙY NGUỒN)
+        # 1. QUÉT LINK
         new_books = []
         try:
             driver.set_page_load_timeout(20) 
             driver.get(target_url)
             time.sleep(1.5)
             
-            # --- LOGIC QUÉT FANQIE ---
+            # --- LOGIC QUÉT THEO NGUỒN ---
+            elems = []
+            
             if source_type == "fanqie":
                 for i in range(SCROLL_TIMES):
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                     time.sleep(0.5)
-                story_elements = driver.find_elements(By.CSS_SELECTOR, "a[href^='/page/']")
-                
-                for elem in story_elements:
-                    raw_href = elem.get_attribute('href')
-                    if raw_href and "fanqienovel.com/page/" in raw_href:
-                        book_id = get_book_id(raw_href)
-                        if book_id and book_id not in processed_ids:
-                            if not any(item[0] == book_id for item in new_books):
-                                try: book_text = elem.find_element(By.XPATH, "./../..").text
-                                except: book_text = elem.text
-                                
-                                if check_is_recent(book_text):
-                                    new_books.append((book_id, raw_href))
-                                else:
-                                    if "sort=newest" in target_url:
-                                        stop_scan_completely = True; break
+                elems = driver.find_elements(By.CSS_SELECTOR, "a[href^='/page/']")
             
-            # --- LOGIC QUÉT JJWXC ---
             elif source_type == "jjwxc":
                 elems = driver.find_elements(By.CSS_SELECTOR, "a[href*='onebook.php?novelid=']")
-                for elem in elems:
-                    raw_href = elem.get_attribute('href')
-                    if raw_href and "novelid=" in raw_href and "chapterid=" not in raw_href:
-                        book_id = get_book_id(raw_href)
-                        if book_id and book_id not in processed_ids:
-                            if not any(item[0] == book_id for item in new_books):
+            
+            elif source_type == "qimao":
+                for i in range(SCROLL_TIMES):
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(0.5)
+                elems = driver.find_elements(By.CSS_SELECTOR, "a[href*='/shuku/']")
+
+            elif source_type == "ciweimao":
+                for i in range(SCROLL_TIMES):
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(0.5)
+                elems = driver.find_elements(By.CSS_SELECTOR, "a[href*='/book/']")
+
+            # --- LỌC VÀ LẤY ID ---
+            for elem in elems:
+                raw_href = elem.get_attribute('href')
+                if not raw_href: continue
+                
+                is_valid = False
+                
+                if source_type == "fanqie" and "fanqienovel.com/page/" in raw_href: 
+                    is_valid = True
+                elif source_type == "jjwxc" and "novelid=" in raw_href and "chapterid=" not in raw_href: 
+                    is_valid = True
+                elif source_type == "qimao":
+                    if "qimao.com/shuku/" in raw_href and re.search(r'/shuku/\d+/?$', raw_href):
+                        is_valid = True
+                elif source_type == "ciweimao":
+                    if "ciweimao.com/book/" in raw_href and re.search(r'/book/\d+/?$', raw_href):
+                        is_valid = True
+                
+                if is_valid:
+                    book_id = get_book_id(raw_href)
+                    if book_id and book_id not in processed_ids:
+                        if not any(item[0] == book_id for item in new_books):
+                            # Check ngày Fanqie
+                            if source_type == "fanqie":
+                                try: book_text = elem.find_element(By.XPATH, "./../..").text
+                                except: book_text = elem.text
+                                if check_is_recent(book_text): new_books.append((book_id, raw_href))
+                                elif "sort=newest" in target_url: stop_scan_completely = True; break
+                            else:
                                 new_books.append((book_id, raw_href))
 
         except Exception as e:
             print(f"[!] Lỗi quét link: {e}. Thử lại...")
+            time.sleep(2)
             continue
 
         if not new_books:
@@ -235,33 +287,35 @@ def run_automation(driver, wait, custom_url, source_type="fanqie"):
         print("=> Bắt đầu nhúng (Nhấn 'q' để DỪNG)...")
         original_window = driver.current_window_handle
         
-        driver.switch_to.new_window('tab')
+        # Mở tab STV
         try:
-            driver.set_page_load_timeout(5)
+            driver.switch_to.new_window('tab')
+            driver.set_page_load_timeout(15)
             driver.get(SANGTACVIET_URL)
-        except: pass
-
+        except Exception as e:
+            print(f"-> [!] Lỗi mở tab STV: {e}")
+            reset_stv_tab(driver, original_window)
+        
         stop_requested = False
 
         for index, (book_id, link) in enumerate(new_books):
-            # --- KIỂM TRA PHÍM TẮT ---
-            if msvcrt.kbhit():
-                key = msvcrt.getch()
-                if key.lower() == b'q':
-                    print("\n[!!!] Đã nhận lệnh DỪNG.")
-                    stop_requested = True
-                    break
+            if msvcrt.kbhit() and msvcrt.getch().lower() == b'q':
+                print("\n[!!!] Đã nhận lệnh DỪNG.")
+                stop_requested = True
+                break
             
             if book_id in processed_ids: continue
 
             print(f"ID: {book_id} | ", end='')
             
             try:
-                driver.set_page_load_timeout(5)
-                driver.set_script_timeout(5)
+                driver.set_page_load_timeout(10)
+                driver.set_script_timeout(10)
                 
-                wait_short = WebDriverWait(driver, 3)
+                wait_short = WebDriverWait(driver, 5) 
+                
                 search_box = wait_short.until(EC.presence_of_element_located((By.TAG_NAME, "input")))
+                
                 search_box.clear()
                 try: 
                     search_box.send_keys(Keys.CONTROL + "a")
@@ -277,6 +331,7 @@ def run_automation(driver, wait, custom_url, source_type="fanqie"):
 
             except (TimeoutException, ReadTimeoutError, WebDriverException, Exception) as e:
                 print(f"Lỗi/Lag -> Reset Tab & SKIP.")
+                time.sleep(2)
                 reset_stv_tab(driver, original_window)
 
         try:
@@ -305,14 +360,16 @@ def main():
         print("\n================ MENU TOOL NHÚNG TRUYỆN ================")
         print("1. Mở Sangtacviet (Để đăng nhập)")
         print("2. Chạy Auto (Nguồn Fanqie - Nhập Link)")
-        print("3. Chạy Auto (Nguồn Jjwxc/Tấn Giang - Nhập Link)")
-        print("4. Xem tổng số ID đã làm")
-        print("5. Thoát")
+        print("3. Chạy Auto (Nguồn Jjwxc - Tấn Giang)")
+        print("4. Chạy Auto (Nguồn Qimao - Thất Miêu)")
+        print("5. Chạy Auto (Nguồn Ciweimao - Thất Vĩ Miêu)")
+        print("6. Xem tổng số ID đã làm")
+        print("7. Thoát")
         print("========================================================")
         
-        choice = input("Chọn chức năng (1-5): ").strip()
+        choice = input("Chọn chức năng (1-7): ").strip()
         
-        if choice in ['1', '2', '3']:
+        if choice in ['1', '2', '3', '4', '5']:
             if driver is None:
                 print("\n[*] Khởi động Chrome...")
                 try:
@@ -333,20 +390,38 @@ def main():
                 input("\n-> Enter về Menu...")
             elif choice == '3':
                 print("\n--- NHẬP LINK JJWXC ---")
-                print("Ví dụ: https://www.jjwxc.net/bookbase_slave.php?t=2...&page=1...")
-                lnk = input("Dán link vào đây: ").strip()
+                print("Ví dụ: ...&page=1...")
+                lnk = input("Dán link: ").strip()
                 if lnk: 
                     run_automation(driver, wait, custom_url=lnk, source_type="jjwxc")
                 else:
                     print("Link trống!")
                 input("\n-> Enter về Menu...")
+            elif choice == '4':
+                print("\n--- NHẬP LINK QIMAO ---")
+                print("Ví dụ: ...-click-1/")
+                lnk = input("Dán link: ").strip()
+                if lnk: 
+                    run_automation(driver, wait, custom_url=lnk, source_type="qimao")
+                else:
+                    print("Link trống!")
+                input("\n-> Enter về Menu...")
+            elif choice == '5':
+                print("\n--- NHẬP LINK CIWEIMAO ---")
+                print("Ví dụ: .../quanbu/1")
+                lnk = input("Dán link: ").strip()
+                if lnk: 
+                    run_automation(driver, wait, custom_url=lnk, source_type="ciweimao")
+                else:
+                    print("Link trống!")
+                input("\n-> Enter về Menu...")
 
-        elif choice == '4':
+        elif choice == '6':
             current_ids = load_history()
             print(f"\n[INFO] Tổng số ID đã lưu: {len(current_ids)}")
             input("\n-> Nhấn Enter để quay lại Menu...")
         
-        elif choice == '5':
+        elif choice == '7':
             if driver: 
                 try: driver.quit()
                 except: pass
